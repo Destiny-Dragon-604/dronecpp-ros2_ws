@@ -24,6 +24,7 @@ except ImportError:
     sys.exit("needs pandas, numpy and matplotlib:  pip install pandas matplotlib")
 
 WS = Path(__file__).resolve().parent.parent
+SETTLE_S = 10.0  # seconds after a new setpoint excluded from the hold statistics
 
 
 def find_flight(arg):
@@ -55,16 +56,56 @@ class Flight:
     def __init__(self, folder):
         self.folder = folder
         names = ["position_velocity_ned", "attitude_euler", "angular_velocity_body", "imu", "actuator_outputs",
-                 "actuator_controls", "setpoints", "events", "disturbance", "battery", "flight_mode"]
+                 "actuator_controls", "setpoints", "events", "disturbance", "disturbance_events", "battery", "flight_mode"]
         self.d = {n: load(folder, n) for n in names}
-        starts = [df["t_unix"].iloc[0] for df in self.d.values() if df is not None and "t_unix" in df]
-        if not starts:
+        if all(df is None for df in self.d.values()):
             sys.exit(f"{folder} has no data")
-        events = self.d["events"]
-        self.t0 = events["t_unix"].iloc[0] if events is not None else min(starts)
-        for df in self.d.values():
-            if df is not None and "t_unix" in df:
-                df["time"] = df["t_unix"] - self.t0
+
+        # Time base: the logger's steady clock "t" (s since suave_main started). Wall-clock
+        # t_unix is NOT used: WSL/NTP can step it mid-flight.
+        for name, df in self.d.items():
+            if df is not None and name not in ("disturbance", "disturbance_events") and "t" in df:
+                df["time"] = df["t"]
+
+        # Gazebo files are stamped with sim time, which is also PX4's clock. Map sim time to
+        # the logger clock with PX4 message timestamps (attitude / imu carry timestamp_us).
+        self.sim_map = None
+        for ref in ("attitude_euler", "imu"):
+            df = self.d[ref]
+            if df is not None and "timestamp_us" in df and df["timestamp_us"].gt(0).sum() > 10:
+                good = df[df["timestamp_us"] > 0]
+                self.sim_map = np.polyfit(good["timestamp_us"] / 1e6, good["t"], 1)
+                break
+        for name in ("disturbance", "disturbance_events"):
+            df = self.d[name]
+            if df is None:
+                continue
+            if self.sim_map is not None:
+                df["time"] = np.polyval(self.sim_map, df["t_sim"])
+            else:  # fallback: wall clock, relative to the logger start
+                events = self.d["events"]
+                if events is not None:
+                    df["time"] = df["t_unix"] - events["t_unix"].iloc[0] + events["t"].iloc[0]
+
+    def align_truth(self):
+        """Shift Gazebo truth into PX4's local frame (origin where the EKF started).
+
+        Gazebo measures the body origin (~0.2 m above ground on the x500); PX4's local
+        origin is where it initialised. The offset is taken on the ground before the first
+        setpoint, so any later difference is real estimation error.
+        """
+        truth, pv, sp = self["disturbance"], self["position_velocity_ned"], self["setpoints"]
+        if truth is None or pv is None:
+            return None
+        t_end = sp["time"].iloc[0] if sp is not None else pv["time"].iloc[0] + 5.0
+        pre_truth = truth[truth["time"] < t_end]
+        pre_pv = pv[pv["time"] < t_end]
+        if len(pre_truth) < 5 or len(pre_pv) < 5:
+            return None
+        offset = {k: pre_truth[k].mean() - pre_pv[k].mean() for k in ("n_m", "e_m", "d_m")}
+        for k, o in offset.items():
+            truth[k] = truth[k] - o
+        return offset
 
     def __getitem__(self, name):
         return self.d.get(name)
@@ -74,6 +115,12 @@ def add_events(ax_list, flight):
     ev = flight["events"]
     if ev is None:
         return
+    dev = flight["disturbance_events"]
+    if dev is not None and "time" in dev:
+        # When each disturbance actually took effect in the simulation
+        for _, row in dev.iterrows():
+            for ax in ax_list:
+                ax.axvline(row["time"], color="C1", ls=":", lw=0.9, zorder=0)
     marks = ev[ev["kind"].isin(["command", "mark"])]
     for _, row in marks.iterrows():
         for ax in ax_list:
@@ -152,10 +199,12 @@ def plot_all(flight, out, show):
 
     # --- tracking error vs the active position setpoint ---------------------------------
     stats = None
+    all_sp = flight["setpoints"]
     if pv is not None and sp is not None:
-        sp_sorted = sp.sort_values("time")
-        merged = pd.merge_asof(pv.sort_values("time"), sp_sorted[["time", "a", "b", "c"]], on="time", direction="backward")
-        merged = merged.dropna(subset=["a"])
+        # Only while the active setpoint is a position (not during landing etc.).
+        merged = pd.merge_asof(pv.sort_values("time"), all_sp.sort_values("time")[["time", "type", "a", "b", "c"]],
+                               on="time", direction="backward")
+        merged = merged[merged["type"] == "position_ned"]
         if len(merged):
             err = merged[["n_m", "e_m", "d_m"]].to_numpy() - merged[["a", "b", "c"]].to_numpy()
             fig, axes = figure(2, "Position error vs active setpoint (PX4 estimate)")
@@ -170,7 +219,17 @@ def plot_all(flight, out, show):
                 ax.grid(alpha=0.3)
             add_events(axes, flight)
             save(fig, out, "tracking_error", written)
-            stats = (np.sqrt(np.mean(err ** 2, axis=0)), np.sqrt(np.mean(norm ** 2)), norm.max())
+            # Hold performance: skip the first SETTLE_S after every new setpoint (step transients).
+            changes = all_sp["time"].to_numpy()
+            since = merged["time"].to_numpy()[:, None] - changes[None, :]
+            since = np.where(since >= 0, since, np.inf).min(axis=1)
+            hold = since > SETTLE_S
+            hold_stats = None
+            if hold.any():
+                eh = err[hold]
+                nh = np.linalg.norm(eh, axis=1)
+                hold_stats = (np.sqrt(np.mean(eh ** 2, axis=0)), np.sqrt(np.mean(nh ** 2)), nh.max())
+            stats = ((np.sqrt(np.mean(err ** 2, axis=0)), np.sqrt(np.mean(norm ** 2)), norm.max()), hold_stats)
 
     # --- velocity -----------------------------------------------------------------------
     if pv is not None or truth is not None:
@@ -277,20 +336,29 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("flight", nargs="?", help="flight folder (default: newest)")
     parser.add_argument("--show", action="store_true", help="open the figures")
+    parser.add_argument("--no-align", action="store_true",
+                        help="plot Gazebo truth in its own frame instead of PX4's local frame")
     args = parser.parse_args()
 
     folder = find_flight(args.flight)
     print(f"Flight: {folder}")
     flight = Flight(folder)
+    if not args.no_align:
+        offset = flight.align_truth()
+        if offset:
+            print("Gazebo truth aligned to PX4 local frame (offset N {n_m:+.3f} E {e_m:+.3f} D {d_m:+.3f} m)".format(**offset))
     out = folder / "plots"
     out.mkdir(exist_ok=True)
     written, stats = plot_all(flight, out, args.show)
     for path in written:
         print(f"  {path}")
     if stats:
-        rms, rms_norm, max_norm = stats
-        print(f"Tracking error (PX4 estimate vs setpoint): RMS N {rms[0]:.3f}  E {rms[1]:.3f}  D {rms[2]:.3f} m,"
-              f"  |e| RMS {rms_norm:.3f} m, max {max_norm:.3f} m")
+        for label, st in (("all, incl. step transients", stats[0]), (f"holding (>{SETTLE_S:.0f} s after each setpoint)", stats[1])):
+            if st is None:
+                continue
+            rms, rms_norm, max_norm = st
+            print(f"Position error vs setpoint, {label}: RMS N {rms[0]:.3f}  E {rms[1]:.3f}  D {rms[2]:.3f} m,"
+                  f"  |e| RMS {rms_norm:.3f} m, max {max_norm:.3f} m")
     if flight["disturbance"] is None:
         print("(no disturbance.csv: Gazebo truth/disturbance plots need the sim started with tools/sim.sh)")
 
