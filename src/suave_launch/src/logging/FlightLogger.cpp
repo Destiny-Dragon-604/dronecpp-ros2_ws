@@ -1,6 +1,8 @@
 #include "FlightLogger.h"
 
+#include <algorithm>
 #include <array>
+#include <iostream>
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
@@ -8,6 +10,7 @@
 #include <sstream>
 
 #include <ament_index_cpp/get_package_share_directory.hpp>
+#include <log_callback.h>
 #include <plugins/info/info.h>
 
 #include "../util/Util.h"
@@ -51,6 +54,54 @@ std::string to_str(const T& v)
 }
 }
 
+namespace
+{
+// The flight currently receiving MAVSDK log lines (guarded so finish() can detach safely).
+std::mutex s_active_mutex;
+FlightLogger* s_active{ nullptr };
+
+// MAVSDK lines that are expected and harmless, kept out of the console (still logged).
+bool is_noise(const std::string& m)
+{
+    static const char* patterns[] = {
+        "User callback queue too slow", "See: https://mavsdk", "System status is usually fixed",
+        "Dropping command", "Received ack for not-existing command", "Vehicle type changed",
+        "sending again", "Retrying failed",
+    };
+    for (const char* p : patterns)
+        if (m.find(p) != std::string::npos) return true;
+    return false;
+}
+}
+
+void FlightLogger::install_mavsdk_log_filter()
+{
+    mavsdk::log::subscribe([](mavsdk::log::Level level, const std::string& message,
+                              const std::string& file, int line) {
+        {
+            std::lock_guard<std::mutex> lock{ s_active_mutex };
+            if (s_active) s_active->mavsdk_log(static_cast<int>(level), message, file + ":" + std::to_string(line));
+        }
+        if (message.rfind("MAVLink: ", 0) == 0)
+        {
+            // PX4 status text ("Armed by external command", "Takeoff detected", failsafes, ...)
+            std::cout << "PX4: " << message.substr(9) << std::endl;
+        }
+        else if (level == mavsdk::log::Level::Err || (level == mavsdk::log::Level::Warn && !is_noise(message)))
+        {
+            std::cerr << "MAVSDK " << (level == mavsdk::log::Level::Err ? "error" : "warning") << ": " << message << std::endl;
+        }
+        return true;  // we printed what matters; suppress MAVSDK's own output
+    });
+}
+
+void FlightLogger::mavsdk_log(int level, const std::string& message, const std::string& location)
+{
+    static const char* names[] = { "debug", "info", "warn", "error" };
+    auto& w = csv("mavsdk_log", "level,message,location");
+    w.write(w.begin() << names[std::clamp(level, 0, 3)] << message << location);
+}
+
 fs::path FlightLogger::data_root()
 {
     if (const char* env = std::getenv("SUAVE_DATA_DIR"); env && *env)
@@ -86,6 +137,10 @@ FlightLogger::FlightLogger(Drone& drone, const bool sitl) :
     std::ofstream(m_marker, std::ofstream::trunc) << fs::absolute(m_dir).string() << '\n';
 
     suave_log << "Logging flight data to " << m_dir.string() << std::endl;
+    {
+        std::lock_guard<std::mutex> lock{ s_active_mutex };
+        s_active = this;
+    }
 
     event("start", sitl ? "SITL" : "hardware");
     subscribe_all();
@@ -165,12 +220,6 @@ void FlightLogger::subscribe_all()
         });
     }
     {
-        auto& w = csv("heading", "heading_deg");
-        m_drone.heading_stream().add_listener([&w](T::Heading h) {
-            w.write(w.begin() << h.heading_deg);
-        });
-    }
-    {
         auto& w = csv("armed", "armed");
         m_drone.armed_stream().add_listener([this, &w](bool v) {
             if (changed("armed", to_str(v))) w.write(w.begin() << v);
@@ -188,12 +237,6 @@ void FlightLogger::subscribe_all()
         auto& w = csv("angular_velocity_body", "roll_rad_s,pitch_rad_s,yaw_rad_s");
         tel.subscribe_attitude_angular_velocity_body([&w](T::AngularVelocityBody a) {
             w.write(w.begin() << a.roll_rad_s << a.pitch_rad_s << a.yaw_rad_s);
-        });
-    }
-    {
-        auto& w = csv("velocity_ned", "vn_m_s,ve_m_s,vd_m_s");
-        tel.subscribe_velocity_ned([&w](T::VelocityNed v) {
-            w.write(w.begin() << v.north_m_s << v.east_m_s << v.down_m_s);
         });
     }
     const std::string imu_header =
@@ -352,26 +395,25 @@ void FlightLogger::subscribe_all()
 
 void FlightLogger::set_rates()
 {
-    // SITL MAVLink runs at MB/s, so ask for high rates. On the drone the PX4 link is a
-    // 57600 baud serial line (~5.7 kB/s) shared with VIO and offboard traffic: keep it
-    // light and rely on the PX4 ULog on the SD card for high-rate data.
-    const double fast = m_sitl ? 50.0 : 10.0;
-    const double imu = m_sitl ? 100.0 : 10.0;
+    // SITL MAVLink has plenty of bandwidth, but every message is a callback on MAVSDK's single
+    // user thread, so keep CSV rates moderate; the PX4 ULog holds everything at full rate.
+    // On the drone the PX4 link is a 57600 baud serial line (~5.7 kB/s) shared with VIO and
+    // offboard traffic: keep it light there too.
+    const double fast = m_sitl ? 30.0 : 10.0;
+    const double imu = m_sitl ? 50.0 : 10.0;
     const double slow = m_sitl ? 5.0 : 1.0;
 
     auto& tel = m_drone.telemetry();
     const std::vector<std::pair<std::string, std::function<Telemetry::Result()>>> requests = {
         { "position_velocity_ned", [&]() { return tel.set_rate_position_velocity_ned(fast); } },
         { "attitude", [&]() { return tel.set_rate_attitude(fast); } },
-        { "velocity_ned", [&]() { return tel.set_rate_velocity_ned(fast); } },
         { "imu", [&]() { return tel.set_rate_imu(imu); } },
-        { "scaled_imu", [&]() { return tel.set_rate_scaled_imu(m_sitl ? fast : slow); } },
-        { "raw_imu", [&]() { return tel.set_rate_raw_imu(m_sitl ? fast : slow); } },
+        { "scaled_imu", [&]() { return tel.set_rate_scaled_imu(m_sitl ? 10.0 : slow); } },
+        { "raw_imu", [&]() { return tel.set_rate_raw_imu(m_sitl ? 10.0 : slow); } },
         { "odometry", [&]() { return tel.set_rate_odometry(fast); } },
         { "actuator_output_status", [&]() { return tel.set_rate_actuator_output_status(fast); } },
         { "actuator_control_target", [&]() { return tel.set_rate_actuator_control_target(fast); } },
         { "position", [&]() { return tel.set_rate_position(m_sitl ? 10.0 : slow); } },
-        { "ground_truth", [&]() { return tel.set_rate_ground_truth(m_sitl ? fast : slow); } },
         { "battery", [&]() { return tel.set_rate_battery(slow); } },
         { "gps_info", [&]() { return tel.set_rate_gps_info(slow); } },
         { "rc_status", [&]() { return tel.set_rate_rc_status(slow); } },
@@ -464,6 +506,10 @@ void FlightLogger::finish()
     if (m_finished.exchange(true)) return;
 
     event("stop", "logger finishing");
+    {
+        std::lock_guard<std::mutex> lock{ s_active_mutex };
+        if (s_active == this) s_active = nullptr;
+    }
     if (m_setup_thread.joinable()) m_setup_thread.join();
     if (m_rosbag) m_rosbag->stop();
     if (m_sitl) copy_px4_ulog();

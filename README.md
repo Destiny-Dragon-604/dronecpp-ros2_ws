@@ -92,6 +92,7 @@ Every run of `suave_main` creates `data/flight_<YYYYmmdd_HHMMSS>/` (override the
 | `battery.csv`, `health.csv`, `flight_mode.csv`, `landed_state.csv`, `armed.csv`, `in_air.csv`, `rc_status.csv`, `status_text.csv`, `scaled_pressure.csv`, `distance_sensor.csv` | system state (state-like streams only on change) |
 | `setpoints.csv` | every offboard setpoint sent to PX4 |
 | `events.csv` | console commands, results, marks, errors |
+| `mavsdk_log.csv` | every MAVSDK log line (the console only shows real warnings/errors and PX4 messages) |
 | `disturbance.csv`, `disturbance_events.csv` | SITL: wind, forces, torques and Gazebo ground truth at 100 Hz |
 | `px4_*.ulg` | SITL: the full PX4 log (every uORB topic) |
 | `rosbag/` | all ROS 2 topics (`SUAVE_ROSBAG=0` to disable) |
@@ -99,7 +100,7 @@ Every run of `suave_main` creates `data/flight_<YYYYmmdd_HHMMSS>/` (override the
 
 All CSVs share `t_unix` (wall clock, s) and `t` (s since start), so they line up with each other and with `disturbance.csv`.
 
-Rates: 50–100 Hz in SITL. On the drone the PX4 link is a 57600 baud serial line shared with VIO and offboard traffic, so the logger asks for ~10 Hz there. For high-rate data from real flights use the ULog on the flight controller's SD card (download with QGroundControl).
+Rates: ~30 Hz for state and actuators, 50 Hz IMU in SITL (each message costs a callback on MAVSDK's single user thread; the PX4 ULog has everything at full rate). On the drone the PX4 link is a 57600 baud serial line shared with VIO and offboard traffic, so the logger asks for ~10 Hz there. For high-rate data from real flights use the ULog on the flight controller's SD card (download with QGroundControl).
 
 Plot a flight (newest by default):
 ```

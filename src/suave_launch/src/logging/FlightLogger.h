@@ -48,6 +48,11 @@ public:
 
     static std::filesystem::path data_root();
 
+    // Call once at startup, before connecting: keeps the console to real warnings, errors
+    // and PX4 status messages, and records every MAVSDK log line in mavsdk_log.csv of the
+    // active flight.
+    static void install_mavsdk_log_filter();
+
 private:
     CsvWriter& csv(const std::string& name, const std::string& header);
     void subscribe_all();
@@ -74,6 +79,8 @@ private:
     std::mutex m_state_mutex{};
     std::map<std::string, std::string> m_last_state{};
     bool changed(const std::string& stream, const std::string& value);
+
+    void mavsdk_log(int level, const std::string& message, const std::string& location);
 };
 
 #endif //FLIGHTLOGGER_H
