@@ -4,68 +4,84 @@
 
 #include "SystemTask.h"
 
-#include <cstring>
 #include <chrono>
 #include <csignal>
+#include <cstring>
 #include <thread>
 #include <unistd.h>
 
+std::string SystemTask::command_line() const
+{
+    std::string command{};
+    for (size_t i = 0; i < m_commands.size(); ++i)
+    {
+        if (i > 0) command += " && ";
+        command += m_commands[i];
+    }
+    if (!m_should_print_output) command += " > /dev/null 2>&1";
+    return command;
+}
+
 TaskResult SystemTask::start()
 {
-    std::string command = "bash -c '";
-    for (const auto& subcommand: m_commands)
+    // Runs in the forked child only. After fork() in a multithreaded program only
+    // async-signal-safe calls are allowed until exec, so no logging or allocation here
+    // beyond what was prepared by the parent.
+    execl("/bin/bash", "bash", "-c", m_prepared_command.c_str(), static_cast<char*>(nullptr));
+    return TaskResult::FAILURE;
+}
+
+namespace
+{
+// Waits up to timeout for the child to exit; true if it did.
+bool wait_exit(pid_t pid, int& status, std::chrono::milliseconds timeout)
+{
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline)
     {
-        if (subcommand == m_commands.back()) command += subcommand + (m_should_print_output? "'" : " > /dev/null 2>&1'");
-        else command += subcommand + "&&";
+        const pid_t r = waitpid(pid, &status, WNOHANG);
+        if (r == pid || r == -1) return true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
-    suave_log << "Executing command: " << command << std::endl;
-    execl("/bin/bash", "bash", "-c", command.c_str(), static_cast<char*>(nullptr));
-    return TaskResult::SUCCESS;
+    return false;
+}
 }
 
 void SystemTask::stop()
 {
-    if (m_pid > 0) {
-        suave_log << "Stopping process: " << m_pid << std::endl;
+    if (m_pid <= 0) return;
 
-        // SIGINT the whole process group: bash and everything it started (ros2 launch, ros2 bag, ...)
-        const int killResult = kill(-m_pid, SIGINT);
-        if (killResult == -1) {
-            suave_err << "Failed to send SIGINT signal to process " << m_pid << ": " << strerror(errno) << std::endl;
-            return;
-        }
+    suave_log << "Stopping process group: " << m_pid << std::endl;
+    int status = 0;
 
-        suave_log << "Waiting for process: " << m_pid << " to interrupt" << std::endl;
-
-        // Wait for the child process to terminate (escalate if it ignores SIGINT)
-        int status;
-        int waitResult = 0;
-        for (int i = 0; i < 100; ++i)  // up to 10 s
+    // SIGINT first (lets ros2 launch / ros2 bag shut down cleanly), then SIGTERM, then
+    // SIGKILL. Never block forever: a stuck child must not stall the caller.
+    const std::pair<int, std::chrono::milliseconds> steps[] = {
+        { SIGINT, std::chrono::milliseconds(5000) },
+        { SIGTERM, std::chrono::milliseconds(3000) },
+        { SIGKILL, std::chrono::milliseconds(2000) },
+    };
+    bool exited = false;
+    for (const auto& [sig, timeout] : steps)
+    {
+        if (kill(-m_pid, sig) == -1 && errno == ESRCH)
         {
-            waitResult = waitpid(m_pid, &status, WNOHANG);
-            if (waitResult != 0) break;
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            exited = wait_exit(m_pid, status, std::chrono::milliseconds(100));
+            break;
         }
-        if (waitResult == 0)
+        if (wait_exit(m_pid, status, timeout))
         {
-            suave_warn << "Process group " << m_pid << " ignored SIGINT, sending SIGTERM" << std::endl;
-            kill(-m_pid, SIGTERM);
-            waitResult = waitpid(m_pid, &status, 0);
+            exited = true;
+            break;
         }
-        if (waitResult == -1) {
-            suave_err << "Failed to wait for process interrupt: " << strerror(errno) << std::endl;
-            return;
-        }
-
-        if (WIFSIGNALED(status)) {
-            suave_log << "Process: " << m_pid << " interrupted by signal " << WTERMSIG(status) << std::endl;
-        } else {
-            suave_log << "Process: " << m_pid << " interrupted" << std::endl;
-        }
-
-        // Reset PID after process termination
-        m_pid = -1;
+        suave_warn << "Process group " << m_pid << " still running after signal " << sig << std::endl;
     }
+    // Clean up anything left in the group (e.g. a child that outlived bash).
+    kill(-m_pid, SIGKILL);
+
+    if (exited) suave_log << "Process group " << m_pid << " stopped" << std::endl;
+    else suave_err << "Process group " << m_pid << " did not exit" << std::endl;
+    m_pid = -1;
 }
 
 std::future<TaskResult>* SystemTask::start_in_thread()
@@ -76,20 +92,28 @@ std::future<TaskResult>* SystemTask::start_in_thread()
         return nullptr;
     }
 
-    const pid_t pid = fork();
+    m_prepared_command = command_line();
+    suave_log << "Executing command: " << m_prepared_command << std::endl;
 
-    if (pid == 0) {
-        setpgid(0, 0);  // own process group so stop() can signal every child
-        const auto result = this->start();
-        exit(result == TaskResult::SUCCESS ? 0 : 1);
+    const pid_t pid = fork();
+    if (pid == 0)
+    {
+        // Child: own process group so stop() can signal every descendant, and default
+        // signal dispositions (the parent's handlers must never run in here).
+        setpgid(0, 0);
+        signal(SIGINT, SIG_DFL);
+        signal(SIGTERM, SIG_DFL);
+        signal(SIGQUIT, SIG_DFL);
+        this->start();
+        _exit(127);  // exec failed; _exit skips the parent's atexit handlers and destructors
     }
-    if (pid < 0) {
+    if (pid < 0)
+    {
         suave_err << "Failed to fork process" << std::endl;
         return nullptr;
     }
 
     setpgid(pid, pid);  // same as the child does; whichever runs first wins the race
-    suave_log << "Setting PID to: " << pid << std::endl;
     m_pid = pid;
     return nullptr;
 }

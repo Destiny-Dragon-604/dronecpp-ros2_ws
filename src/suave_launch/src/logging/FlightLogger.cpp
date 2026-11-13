@@ -457,17 +457,24 @@ void FlightLogger::write_metadata()
 
 void FlightLogger::start_rosbag()
 {
-    if (const char* env = std::getenv("SUAVE_ROSBAG"); env && std::string(env) == "0")
+    // Default: on for the real drone (camera, VIO, odometry topics), off in SITL where there
+    // are hardly any ROS topics. SUAVE_ROSBAG=1 / 0 forces it.
+    bool enabled = !m_sitl;
+    if (const char* env = std::getenv("SUAVE_ROSBAG"); env && *env) enabled = std::string(env) != "0";
+    if (!enabled)
     {
-        event("rosbag", "disabled (SUAVE_ROSBAG=0)");
+        event("rosbag", "off (set SUAVE_ROSBAG=1 to record ROS 2 topics)");
         return;
     }
+    // exec: bash is replaced by ros2 bag, so stop() signals the recorder directly.
+    // Its output goes to rosbag.log for troubleshooting.
     m_rosbag = std::make_shared<SystemTask>(std::vector<std::string>{
+        "exec > \"" + (m_dir / "rosbag.log").string() + "\" 2>&1",
         "source /opt/ros/humble/setup.bash",
-        "ros2 bag record -a --include-hidden-topics -o \"" + (m_dir / "rosbag").string() + "\""
-    });
+        "exec ros2 bag record -a --include-hidden-topics -o \"" + (m_dir / "rosbag").string() + "\""
+    }, true);
     m_rosbag->start_in_thread();
-    event("rosbag", "recording all ROS 2 topics");
+    event("rosbag", "recording all ROS 2 topics (log: rosbag.log)");
 }
 
 void FlightLogger::copy_px4_ulog()
@@ -511,22 +518,31 @@ void FlightLogger::finish()
         if (s_active == this) s_active = nullptr;
     }
     if (m_setup_thread.joinable()) m_setup_thread.join();
-    if (m_rosbag) m_rosbag->stop();
-    if (m_sitl) copy_px4_ulog();
 
+    // Cheap, important steps first, so nothing below can cost them.
+    if (m_sitl) copy_px4_ulog();
     std::error_code ec;
     fs::remove(m_marker, ec);
+    write_summary();
 
-    std::ofstream summary(m_dir / "summary.txt");
-    const double duration = std::chrono::duration<double>(CsvWriter::Clock::now() - m_origin).count();
-    summary << "duration_s: " << duration << "\nrows per file:\n";
+    if (m_rosbag)
     {
-        std::lock_guard<std::mutex> lock{ m_writers_mutex };
-        for (auto& [name, writer] : m_writers)
-        {
-            writer->flush();
-            summary << "  " << name << ".csv: " << writer->rows() << '\n';
-        }
+        m_rosbag->stop();
+        event("rosbag", "stopped");
+        write_summary();
     }
     suave_log << "Flight data saved in " << m_dir.string() << std::endl;
+}
+
+void FlightLogger::write_summary()
+{
+    std::ofstream summary(m_dir / "summary.txt", std::ofstream::trunc);
+    const double duration = std::chrono::duration<double>(CsvWriter::Clock::now() - m_origin).count();
+    summary << "duration_s: " << duration << "\nrows per file:\n";
+    std::lock_guard<std::mutex> lock{ m_writers_mutex };
+    for (auto& [name, writer] : m_writers)
+    {
+        writer->flush();
+        summary << "  " << name << ".csv: " << writer->rows() << '\n';
+    }
 }

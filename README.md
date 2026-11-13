@@ -95,7 +95,7 @@ Every run of `suave_main` creates `data/flight_<YYYYmmdd_HHMMSS>/` (override the
 | `mavsdk_log.csv` | every MAVSDK log line (the console only shows real warnings/errors and PX4 messages) |
 | `disturbance.csv`, `disturbance_events.csv` | SITL: wind, forces, torques and Gazebo ground truth at 100 Hz |
 | `px4_*.ulg` | SITL: the full PX4 log (every uORB topic) |
-| `rosbag/` | all ROS 2 topics (`SUAVE_ROSBAG=0` to disable) |
+| `rosbag/`, `rosbag.log` | all ROS 2 topics; on by default on the drone, off in SITL (`SUAVE_ROSBAG=1`/`0` to force) |
 | `metadata.txt`, `summary.txt` | branch/commit, PX4 version, rows per file |
 
 All CSVs share `t_unix` (wall clock, s) and `t` (s since start), so they line up with each other and with `disturbance.csv`.

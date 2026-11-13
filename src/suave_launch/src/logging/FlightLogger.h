@@ -60,6 +60,7 @@ private:
     void write_metadata();
     void start_rosbag();
     void copy_px4_ulog();
+    void write_summary();
 
     Drone& m_drone;
     bool m_sitl;
