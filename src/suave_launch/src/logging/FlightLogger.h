@@ -47,6 +47,8 @@ public:
     void finish();
 
     static std::filesystem::path data_root();
+    // Workspace root (<ws> in <ws>/install/suave_launch/...), empty if not found.
+    static std::filesystem::path workspace_dir();
 
     // Call once at startup, before connecting: keeps the console to real warnings, errors
     // and PX4 status messages, and records every MAVSDK log line in mavsdk_log.csv of the
@@ -61,6 +63,7 @@ private:
     void start_rosbag();
     void copy_px4_ulog();
     void write_summary();
+    void export_flight();
 
     Drone& m_drone;
     bool m_sitl;

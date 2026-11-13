@@ -102,23 +102,29 @@ void FlightLogger::mavsdk_log(int level, const std::string& message, const std::
     w.write(w.begin() << names[std::clamp(level, 0, 3)] << message << location);
 }
 
+fs::path FlightLogger::workspace_dir()
+{
+    try
+    {
+        // <ws>/install/suave_launch/share/suave_launch -> <ws>
+        const fs::path share{ ament_index_cpp::get_package_share_directory("suave_launch") };
+        const auto ws = fs::weakly_canonical(share / ".." / ".." / ".." / "..");
+        if (fs::exists(ws / "src")) return ws;
+    }
+    catch (...) { /* not found */ }
+    return {};
+}
+
 fs::path FlightLogger::data_root()
 {
     if (const char* env = std::getenv("SUAVE_DATA_DIR"); env && *env)
     {
         return fs::path(env);
     }
-    try
+    if (const auto ws = workspace_dir(); !ws.empty())
     {
-        // <ws>/install/suave_launch/share/suave_launch -> <ws>
-        const fs::path share{ ament_index_cpp::get_package_share_directory("suave_launch") };
-        const auto ws = fs::weakly_canonical(share / ".." / ".." / ".." / "..");
-        if (fs::exists(ws / "src"))
-        {
-            return ws / "data";
-        }
+        return ws / "data";
     }
-    catch (...) { /* fall through */ }
     const char* home = std::getenv("HOME");
     return fs::path(home ? home : ".") / "suave_data";
 }
@@ -434,7 +440,7 @@ void FlightLogger::set_rates()
 void FlightLogger::write_metadata()
 {
     std::ofstream f(m_dir / "metadata.txt");
-    const auto ws = data_root().parent_path();
+    const auto ws = workspace_dir();
     f << "start_local: " << timestamp_string() << '\n'
       << "connection: " << (m_sitl ? "SITL udp://:14540" : "serial") << '\n'
       << "workspace_branch: " << run("git -C '" + ws.string() + "' rev-parse --abbrev-ref HEAD 2>/dev/null") << '\n'
@@ -532,6 +538,45 @@ void FlightLogger::finish()
         write_summary();
     }
     suave_log << "Flight data saved in " << m_dir.string() << std::endl;
+    export_flight();
+}
+
+// SUAVE_EXPORT_DIR (e.g. a Windows folder under /mnt/c on a WSL laptop): after the flight,
+// plot it (SITL) and copy the whole folder there. Logging itself always goes to the fast
+// local disk; writing ~30 CSVs live to /mnt/c would slow MAVSDK's callback thread.
+void FlightLogger::export_flight()
+{
+    const char* env = std::getenv("SUAVE_EXPORT_DIR");
+    if (!env || !*env) return;
+    const fs::path export_root{ env };
+
+    // Give the Gazebo plugin time to see the marker is gone and stop writing here.
+    if (m_sitl) std::this_thread::sleep_for(std::chrono::milliseconds(700));
+
+    const auto ws = workspace_dir();
+    const char* plot_env = std::getenv("SUAVE_AUTO_PLOT");
+    const bool plot = m_sitl ? !(plot_env && std::string(plot_env) == "0") : (plot_env && std::string(plot_env) == "1");
+    if (plot && !ws.empty() && fs::exists(ws / "tools" / "plot_flight.py"))
+    {
+        suave_log << "Plotting the flight..." << std::endl;
+        const std::string cmd = "timeout 120 python3 \"" + (ws / "tools" / "plot_flight.py").string() + "\" \""
+            + m_dir.string() + "\" > \"" + (m_dir / "plots.log").string() + "\" 2>&1";
+        if (std::system(cmd.c_str()) != 0)
+        {
+            suave_warn << "Plotting failed, see " << (m_dir / "plots.log").string() << std::endl;
+        }
+    }
+
+    std::error_code ec;
+    fs::create_directories(export_root, ec);
+    const auto target = export_root / m_dir.filename();
+    fs::copy(m_dir, target, fs::copy_options::recursive | fs::copy_options::overwrite_existing, ec);
+    if (ec)
+    {
+        suave_err << "Could not copy the flight to " << target.string() << ": " << ec.message() << std::endl;
+        return;
+    }
+    suave_log << "Flight copied to " << target.string() << std::endl;
 }
 
 void FlightLogger::write_summary()

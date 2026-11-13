@@ -98,7 +98,13 @@ Every run of `suave_main` creates `data/flight_<YYYYmmdd_HHMMSS>/` (override the
 | `rosbag/`, `rosbag.log` | all ROS 2 topics; on by default on the drone, off in SITL (`SUAVE_ROSBAG=1`/`0` to force) |
 | `metadata.txt`, `summary.txt` | branch/commit, PX4 version, rows per file |
 
-All CSVs share `t_unix` (wall clock, s) and `t` (s since start), so they line up with each other and with `disturbance.csv`.
+All logger CSVs share `t` (steady clock, s since start) and `t_unix` (wall clock). Use `t`: on WSL the wall clock can be stepped mid-flight. Gazebo files (`disturbance*.csv`) are stamped with sim time `t_sim`, which is also PX4's clock (`timestamp_us`); `plot_flight.py` maps between them.
+
+**Copy to another folder automatically:** set `SUAVE_EXPORT_DIR` and, when `suave_main` exits, the flight folder is plotted (SITL) and copied there. On the WSL laptop it points at the Windows desktop:
+```
+export SUAVE_EXPORT_DIR="/mnt/c/Users/<you>/Desktop/Drone Controls/Flight Data"
+```
+Logging itself always goes to the local disk (fast); only the finished flight is copied. `SUAVE_AUTO_PLOT=0` skips the plots.
 
 Rates: ~30 Hz for state and actuators, 50 Hz IMU in SITL (each message costs a callback on MAVSDK's single user thread; the PX4 ULog has everything at full rate). On the drone the PX4 link is a 57600 baud serial line shared with VIO and offboard traffic, so the logger asks for ~10 Hz there. For high-rate data from real flights use the ULog on the flight controller's SD card (download with QGroundControl).
 

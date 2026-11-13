@@ -143,6 +143,13 @@ alias disturb='python3 ~/Dev/dronecpp-ros2_ws/tools/disturb.py'
 alias plotflight='python3 ~/Dev/dronecpp-ros2_ws/tools/plot_flight.py'
 EOF
 fi
+# Finished flights are also copied to the Windows desktop.
+if ! grep -q "SUAVE_EXPORT_DIR" "$HOME/.bashrc"; then
+    WIN_HOME="$(wslpath "$(cmd.exe /c 'echo %USERPROFILE%' 2>/dev/null | tr -d '\r')" 2>/dev/null || true)"
+    if [ -n "$WIN_HOME" ] && [ -d "$WIN_HOME/Desktop" ]; then
+        echo "export SUAVE_EXPORT_DIR=\"$WIN_HOME/Desktop/Drone Controls/Flight Data\"" >> "$HOME/.bashrc"
+    fi
+fi
 
 echo "[DONE]" > "$SCRIPT_DIR/status.txt"
 cat <<EOF
