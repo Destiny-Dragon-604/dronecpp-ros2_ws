@@ -8,6 +8,7 @@
 
 #include "../common/ISuaveController.h"
 #include "../common/ITask.h"
+#include "../logging/FlightLogger.h"
 #include "../mavutil/Drone.h"
 
 // Minimal offboard flight controller.
@@ -26,13 +27,17 @@ private:
     void start_vio_stack();
     void command_loop();
     bool enter_offboard();
-    static void print_help();
-    static bool check(const std::string& what, Offboard::Result result);
+    void print_help() const;
+    bool check(const std::string& what, Offboard::Result result);
+    void send_disturbance(const std::string& line);
 
     bool m_sitl{ false };
     std::atomic<bool> m_end_controller{ false };
     std::atomic<bool> m_shutdown_done{ false };
     std::atomic<bool> m_offboard_active{ false };
+    // Declared before m_drone so it is destroyed after it: MAVSDK callbacks that write to the
+    // logger stop when the Drone (and its Telemetry) goes away.
+    std::unique_ptr<FlightLogger> m_logger{ nullptr };
     std::unique_ptr<Drone> m_drone{ nullptr };
     std::vector<std::shared_ptr<ITask>> m_tasks{};
 };

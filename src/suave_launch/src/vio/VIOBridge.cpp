@@ -127,6 +127,10 @@ void VIOBridge::callback(const OdomMsg::SharedPtr msg)
     const auto odom_result = mocap.set_odometry(odometry);
 
     m_recent_yaw_rad = yaw;
+    if (m_vision_listener)
+    {
+        m_vision_listener(odometry);
+    }
 
 //    PrintMocapOdometry(odometry);
 

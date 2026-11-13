@@ -8,6 +8,8 @@
 #include <plugins/mocap/mocap.h>
 #include <plugins/telemetry/telemetry.h>
 #include <cmath>
+#include <functional>
+#include <optional>
 #include <rclcpp/rclcpp.hpp>
 
 using namespace mavsdk;
@@ -28,10 +30,15 @@ public:
         return m_recent_yaw_rad.load();
     }
 
+    // Called with every vision odometry message forwarded to PX4 (for logging).
+    using VisionListener = std::function<void(const Mocap::Odometry&)>;
+    void set_vision_listener(VisionListener listener) { m_vision_listener = std::move(listener); }
+
 private:
     std::shared_ptr<System> m_system;
     double m_heading_rad{double(NAN)};
     std::atomic<double> m_recent_yaw_rad{};
+    VisionListener m_vision_listener{};
 
     using Subscription = rclcpp::Subscription<OdomMsg>;
     std::optional<Subscription::SharedPtr> m_subscription{};

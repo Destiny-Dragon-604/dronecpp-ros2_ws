@@ -1,0 +1,7 @@
+# Short force and torque kicks (step/impulse response of the position and attitude loops).
+0    push 5 0 0 0.3
+6    push 0 -5 0 0.3
+12   push 0 0 -8 0.3
+18   torque 0.4 0 0 0.2
+24   torque 0 0 0.3 0.5
+30   calm

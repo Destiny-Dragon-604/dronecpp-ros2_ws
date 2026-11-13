@@ -5,6 +5,10 @@
 #include "SystemTask.h"
 
 #include <cstring>
+#include <chrono>
+#include <csignal>
+#include <thread>
+#include <unistd.h>
 
 TaskResult SystemTask::start()
 {
@@ -24,8 +28,8 @@ void SystemTask::stop()
     if (m_pid > 0) {
         suave_log << "Stopping process: " << m_pid << std::endl;
 
-        // Send SIGKILL signal to the child process
-        const int killResult = kill(m_pid, SIGINT);
+        // SIGINT the whole process group: bash and everything it started (ros2 launch, ros2 bag, ...)
+        const int killResult = kill(-m_pid, SIGINT);
         if (killResult == -1) {
             suave_err << "Failed to send SIGINT signal to process " << m_pid << ": " << strerror(errno) << std::endl;
             return;
@@ -33,9 +37,21 @@ void SystemTask::stop()
 
         suave_log << "Waiting for process: " << m_pid << " to interrupt" << std::endl;
 
-        // Wait for the child process to terminate
+        // Wait for the child process to terminate (escalate if it ignores SIGINT)
         int status;
-        const int waitResult = waitpid(m_pid, &status, 0);
+        int waitResult = 0;
+        for (int i = 0; i < 100; ++i)  // up to 10 s
+        {
+            waitResult = waitpid(m_pid, &status, WNOHANG);
+            if (waitResult != 0) break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+        if (waitResult == 0)
+        {
+            suave_warn << "Process group " << m_pid << " ignored SIGINT, sending SIGTERM" << std::endl;
+            kill(-m_pid, SIGTERM);
+            waitResult = waitpid(m_pid, &status, 0);
+        }
         if (waitResult == -1) {
             suave_err << "Failed to wait for process interrupt: " << strerror(errno) << std::endl;
             return;
@@ -63,6 +79,7 @@ std::future<TaskResult>* SystemTask::start_in_thread()
     const pid_t pid = fork();
 
     if (pid == 0) {
+        setpgid(0, 0);  // own process group so stop() can signal every child
         const auto result = this->start();
         exit(result == TaskResult::SUCCESS ? 0 : 1);
     }
@@ -71,6 +88,7 @@ std::future<TaskResult>* SystemTask::start_in_thread()
         return nullptr;
     }
 
+    setpgid(pid, pid);  // same as the child does; whichever runs first wins the race
     suave_log << "Setting PID to: " << pid << std::endl;
     m_pid = pid;
     return nullptr;

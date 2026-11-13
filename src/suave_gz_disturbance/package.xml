@@ -1,0 +1,14 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>suave_gz_disturbance</name>
+  <version>0.1.0</version>
+  <description>Gazebo Harmonic system plugin: wind, turbulence, gusts and external forces/torques on the PX4 SITL vehicle, logged with ground truth</description>
+  <maintainer email="kennedp8@my.erau.edu">suave</maintainer>
+  <license>TODO: License declaration</license>
+
+  <!-- Needs Gazebo Harmonic (gz-sim8), installed by PX4's Tools/setup/ubuntu.sh. -->
+  <export>
+    <build_type>cmake</build_type>
+  </export>
+</package>
