@@ -6,6 +6,7 @@
 #define DRONE_H
 #include <cmath>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -61,6 +62,20 @@ public:
         return m_quaternion.get().unwrap();
     }
 
+    // Streams Drone already owns. MAVSDK 1.x allows one subscriber per stream, so other
+    // consumers (FlightLogger) attach here instead of calling telemetry().subscribe_*().
+    TelemetryProperty<Telemetry::Heading>& heading_stream() { return m_heading; }
+    TelemetryProperty<bool>& in_air_stream() { return m_in_air; }
+    TelemetryProperty<bool>& armed_stream() { return m_armed; }
+    TelemetryProperty<Telemetry::PositionVelocityNed>& position_velocity_ned_stream() { return m_position_velocity_ned; }
+    TelemetryProperty<Telemetry::EulerAngle>& attitude_euler_stream() { return m_attitude_euler; }
+    TelemetryProperty<Telemetry::Quaternion>& attitude_quaternion_stream() { return m_quaternion; }
+
+    // Called with every offboard setpoint sent to PX4.
+    // type: "position_ned" (n,e,d m, yaw deg), "velocity_ned" (m/s, yaw deg) or "velocity_body" (fwd,right,down m/s, yawspeed deg/s)
+    using SetpointListener = std::function<void(const std::string& type, float a, float b, float c, float yaw)>;
+    void set_setpoint_listener(SetpointListener listener) { m_setpoint_listener = std::move(listener); }
+
     std::string get_quaternion_string() const;
     std::string get_ned_position_string() const;
 
@@ -104,6 +119,13 @@ private:
         float yaw;
     };
     std::optional<LocalPosition> m_local_setpoint{};
+    SetpointListener m_setpoint_listener{};
+
+    Offboard::Result send_position_ned(const Offboard::PositionNedYaw& sp);
+    void notify_setpoint(const std::string& type, float a, float b, float c, float yaw) const
+    {
+        if (m_setpoint_listener) m_setpoint_listener(type, a, b, c, yaw);
+    }
 };
 
 #endif //DRONE_H

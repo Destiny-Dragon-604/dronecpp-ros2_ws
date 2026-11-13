@@ -5,3 +5,6 @@ log/
 nohup.out
 src/suave_launch/cmake-build-debug
 __pycache__/
+# flight logs stay local (they can be large); keep the folder itself
+data/*
+!data/.gitkeep

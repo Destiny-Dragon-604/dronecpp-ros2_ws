@@ -1,0 +1,6 @@
+# Steady wind step: hold position in 3, 6 and 9 m/s east wind, then calm.
+# Use while hovering (e.g. takeoff, then: disturb.py run tools/scenarios/steady_wind.txt)
+0    wind 0 3 0
+10   wind 0 6 0
+20   wind 0 9 0
+30   calm

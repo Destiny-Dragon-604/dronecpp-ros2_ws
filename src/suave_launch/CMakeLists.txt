@@ -15,6 +15,7 @@ add_executable(suave_main
   src/suave_main.cpp
   src/common/SystemTask.cpp
   src/controllers/SuaveFlightController.cpp
+  src/logging/FlightLogger.cpp
   src/mavutil/Drone.cpp
   src/mavutil/MavUtil.cpp
   src/mavutil/TelemetryProperty.cpp

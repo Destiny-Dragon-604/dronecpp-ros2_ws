@@ -1,0 +1,7 @@
+# Discrete 1-cosine gusts from different directions on top of a light breeze.
+0    wind 2 0 0
+5    gust 0 8 0 2
+12   gust -6 0 0 1.5
+19   gust 0 0 -3 1
+26   gust 5 5 0 3
+35   calm

@@ -3,6 +3,7 @@
 #include <rclcpp/rclcpp.hpp>
 
 #include "controllers/SuaveFlightController.h"
+#include "logging/FlightLogger.h"
 #include "util/Util.h"
 
 std::unique_ptr<SuaveFlightController> s_controller;
@@ -21,6 +22,7 @@ void signal_handler(int sig)
 
 int main(int argc, char** argv)
 {
+    FlightLogger::install_mavsdk_log_filter();
     suave_log << "Starting suave_main" << std::endl;
     rclcpp::init(argc, argv);
     for (const auto sig : { SIGINT, SIGTERM, SIGQUIT })

@@ -33,8 +33,15 @@ std::string Drone::get_ned_position_string() const
     return ss.str();
 }
 
+Offboard::Result Drone::send_position_ned(const Offboard::PositionNedYaw& sp)
+{
+    notify_setpoint("position_ned", sp.north_m, sp.east_m, sp.down_m, sp.yaw_deg);
+    return offboard().set_position_ned(sp);
+}
+
 Offboard::Result Drone::offboard_setpoint()
 {
+    notify_setpoint("velocity_body", 0, 0, 0, 0);
     return offboard().set_velocity_body({0, 0, 0, 0});
 }
 
@@ -42,7 +49,7 @@ Offboard::Result Drone::set_relative_position_ned(const float& n, const float& e
 {
     const auto [north_m, east_m, down_m] = m_position_velocity_ned.wait_for_next().unwrap().position;
     const auto yaw = m_attitude_euler.wait_for_next(1).unwrap().yaw_deg;
-    return offboard().set_position_ned({north_m + n, east_m + e, down_m + d, yaw});
+    return send_position_ned({north_m + n, east_m + e, down_m + d, yaw});
 }
 
 void Drone::set_local_position_setpoint()
@@ -58,7 +65,7 @@ Offboard::Result Drone::set_local_position_ned(double n, double e, double d)
     {
         set_local_position_setpoint();
     }
-    return offboard().set_position_ned({
+    return send_position_ned({
         static_cast<float>(m_local_setpoint->north + n),
         static_cast<float>(m_local_setpoint->east + e),
         static_cast<float>(m_local_setpoint->down + d),
@@ -68,6 +75,7 @@ Offboard::Result Drone::set_local_position_ned(double n, double e, double d)
 Offboard::Result Drone::offboard_land()
 {
     const auto yaw = m_attitude_euler.wait_for_next().unwrap().yaw_deg;
+    notify_setpoint("velocity_ned", 0, 0, 0.5f, yaw);
     return offboard().set_velocity_ned({0, 0, 0.5, yaw});
 }
 
